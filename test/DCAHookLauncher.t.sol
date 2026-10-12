@@ -269,6 +269,97 @@ contract DCAHookLauncherTest is Test {
         assertEq(newPrice, Q96);
     }
 
+    function test_AtomicActivationStartsUnconfiguredAndMintsNothing() public {
+        bytes32 hash = launcher.hookInitCodeHashFor(address(token));
+        assertEq(launcher.token(), address(0), "preparation does not configure");
+        (bytes32 salt, address predicted) = HookMiner.find(address(launcher), hash, 0, 1_000_000);
+        uint256 supply = token.totalSupply();
+        uint256 deployerBalance = token.balanceOf(address(this));
+
+        vm.expectEmit(true, false, false, true, address(launcher));
+        emit DCAHookLauncher.TokenConfigured(address(token));
+        vm.expectEmit(true, true, false, true, address(launcher));
+        emit DCAHookLauncher.PoolLaunched(predicted, _key(predicted).toId(), salt, Q96);
+        vm.prank(owner);
+        DCAHook deployed = launcher.launchWithToken(address(token), salt, Q96);
+
+        assertEq(address(deployed), predicted);
+        assertEq(launcher.token(), address(token));
+        assertEq(launcher.hookInitCodeHash(), hash);
+        assertEq(token.totalSupply(), supply);
+        assertEq(token.balanceOf(address(this)), deployerBalance);
+        assertEq(token.balanceOf(address(launcher)), 0);
+        assertEq(token.balanceOf(predicted), 0);
+        (uint160 price,,,) = manager.getSlot0(deployed.poolId());
+        assertEq(price, Q96);
+    }
+
+    function test_AtomicActivationCommitsToTokenDespiteEarlierConfiguration() public {
+        bytes32 hash = launcher.hookInitCodeHashFor(address(token));
+        (bytes32 salt, address predicted) = HookMiner.find(address(launcher), hash, 0, 1_000_000);
+        vm.prank(owner);
+        launcher.setToken(makeAddr("stale setting"));
+        vm.prank(owner);
+        DCAHook deployed = launcher.launchWithToken(address(token), salt, Q96);
+        assertEq(address(deployed), predicted);
+        assertEq(deployed.token(), address(token));
+        assertEq(launcher.token(), address(token));
+    }
+
+    function test_AtomicActivationFailureRestoresPriorSettingAndCanRetry() public {
+        bytes32 hash = launcher.hookInitCodeHashFor(address(token));
+        (bytes32 salt, address predicted) = HookMiner.find(address(launcher), hash, 0, 1_000_000);
+        address previous = makeAddr("previous token setting");
+        vm.prank(owner);
+        launcher.setToken(previous);
+        vm.expectRevert(abi.encodeWithSelector(TickMath.InvalidSqrtPrice.selector, uint160(0)));
+        vm.prank(owner);
+        launcher.launchWithToken(address(token), salt, 0);
+        assertEq(launcher.token(), previous);
+        assertEq(address(launcher.hook()), address(0));
+        assertEq(predicted.code.length, 0);
+
+        vm.prank(owner);
+        launcher.launchWithToken(address(token), salt, Q96);
+        assertEq(address(launcher.hook()), predicted);
+        assertEq(launcher.token(), address(token));
+    }
+
+    function test_AtomicActivationUnauthorizedOrMissingCodeLeavesTokenUnset() public {
+        vm.expectRevert(DCAHookLauncher.Unauthorized.selector);
+        vm.prank(address(factory));
+        launcher.launchWithToken(address(token), bytes32(0), Q96);
+        address missing = makeAddr("missing token");
+        vm.expectRevert(abi.encodeWithSelector(DCAHookLauncher.ContractNotDeployed.selector, missing));
+        vm.prank(owner);
+        launcher.launchWithToken(missing, bytes32(0), Q96);
+        assertEq(launcher.token(), address(0));
+        assertEq(address(launcher.hook()), address(0));
+    }
+
+    function test_AtomicActivationCannotReplaceLaunchedHook() public {
+        (bytes32 salt, address predicted) = _configureAndPrepare();
+        vm.prank(owner);
+        launcher.launchWithToken(address(token), salt, Q96);
+        vm.expectRevert(DCAHookLauncher.AlreadyLaunched.selector);
+        vm.prank(owner);
+        launcher.launchWithToken(makeAddr("replacement"), salt, Q96);
+        assertEq(address(launcher.hook()), predicted);
+        assertEq(launcher.token(), address(token));
+    }
+
+    function test_ExplicitTokenHashRejectsInvalidTokenWithoutChangingConfiguration() public {
+        vm.expectRevert(DCAHookLauncher.ZeroAddress.selector);
+        launcher.hookInitCodeHashFor(address(0));
+        vm.expectRevert(DCAHookLauncher.InvalidToken.selector);
+        launcher.hookInitCodeHashFor(FWA);
+        vm.expectRevert(DCAHookLauncher.InvalidToken.selector);
+        launcher.hookInitCodeHashFor(address(manager));
+        vm.expectRevert(DCAHookLauncher.InvalidToken.selector);
+        launcher.hookInitCodeHashFor(address(launcher));
+        assertEq(launcher.token(), address(0));
+    }
+
     function _key(address hookAddress) private view returns (PoolKey memory) {
         (address c0, address c1) = address(token) < FWA ? (address(token), FWA) : (FWA, address(token));
         return PoolKey(Currency.wrap(c0), Currency.wrap(c1), 12_500, 60, IHooks(hookAddress));

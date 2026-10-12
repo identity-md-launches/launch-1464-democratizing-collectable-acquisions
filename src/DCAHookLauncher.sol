@@ -45,17 +45,32 @@ contract DCAHookLauncher {
 
     /// @notice Select the existing project token. Configuration freezes after a successful launch.
     function setToken(address token_) external onlyOwner {
+        _setToken(token_);
+    }
+
+    function _setToken(address token_) private {
         if (address(hook) != address(0)) revert AlreadyLaunched();
-        if (token_ == address(0)) revert ZeroAddress();
-        if (token_ == FWA || token_ == address(poolManager) || token_ == address(this)) revert InvalidToken();
+        _checkToken(token_);
         token = token_;
         emit TokenConfigured(token_);
+    }
+
+    function _checkToken(address token_) private view {
+        if (token_ == address(0)) revert ZeroAddress();
+        if (token_ == FWA || token_ == address(poolManager) || token_ == address(this)) revert InvalidToken();
     }
 
     /// @notice Hash to use when mining the hook salt with this launcher as CREATE2 deployer.
     function hookInitCodeHash() public view returns (bytes32) {
         if (token == address(0)) revert TokenNotConfigured();
-        return keccak256(bytes.concat(type(DCAHook).creationCode, abi.encode(poolManager, token)));
+        return hookInitCodeHashFor(token);
+    }
+
+    /// @notice Prepare activation without first sending a token-configuration transaction.
+    /// @dev Uses this launcher's embedded child code. Does not change the configured token.
+    function hookInitCodeHashFor(address token_) public view returns (bytes32) {
+        _checkToken(token_);
+        return keccak256(bytes.concat(type(DCAHook).creationCode, abi.encode(poolManager, token_)));
     }
 
     function predictHook(bytes32 salt) external view returns (address) {
@@ -70,6 +85,22 @@ contract DCAHookLauncher {
     /// Initialization comes from this launcher, which is also the child's immutable launchFactory.
     /// This initializes a new pool; it cannot change the hook of an existing pool.
     function launch(bytes32 salt, uint160 sqrtPriceX96) external onlyOwner returns (DCAHook deployed) {
+        return _launch(salt, sqrtPriceX96);
+    }
+
+    /// @notice Select the existing token, deploy its hook, and initialize its pool atomically.
+    /// @dev The signed call commits to the token as well as the salt and opening price.
+    /// Any failure also restores the previous token setting. No token is deployed or minted.
+    function launchWithToken(address token_, bytes32 salt, uint160 sqrtPriceX96)
+        external
+        onlyOwner
+        returns (DCAHook deployed)
+    {
+        _setToken(token_);
+        return _launch(salt, sqrtPriceX96);
+    }
+
+    function _launch(bytes32 salt, uint160 sqrtPriceX96) private returns (DCAHook deployed) {
         if (address(hook) != address(0)) revert AlreadyLaunched();
         address configuredToken = token;
         if (configuredToken == address(0)) revert TokenNotConfigured();
