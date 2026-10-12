@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {DCAToken} from "../../src/DCAToken.sol";
 import {DCAHook} from "../../src/DCAHook.sol";
+import {DCAHookLauncher} from "../../src/DCAHookLauncher.sol";
 import {HookMiner} from "../../src/HookMiner.sol";
 import {RestrictedFWA} from "./RestrictedFWA.sol";
 import {PoolRouter} from "./PoolRouter.sol";
@@ -27,6 +28,7 @@ abstract contract HookTestBase is Test {
     PoolManager internal manager;
     DCAToken internal token;
     DCAHook internal hook;
+    DCAHookLauncher internal launcher;
     RestrictedFWA internal fwa;
     PoolRouter internal router;
     PoolRouter internal controlRouter;
@@ -51,7 +53,6 @@ abstract contract HookTestBase is Test {
         token.transfer(address(controlRouter), 100_000_000 ether);
         fwa.mint(address(router), 1e30);
         fwa.mint(address(controlRouter), 1e30);
-        manager.initialize(key, Q96);
         manager.initialize(controlKey, Q96);
         router.liquidity(key, -60_000, 60_000, int256(LIQUIDITY));
         controlRouter.liquidity(controlKey, -60_000, 60_000, int256(LIQUIDITY));
@@ -68,9 +69,10 @@ abstract contract HookTestBase is Test {
     }
 
     function _deployHook(IPoolManager manager_, address token_) internal returns (DCAHook deployed) {
-        bytes32 hash = keccak256(abi.encodePacked(type(DCAHook).creationCode, abi.encode(manager_, token_)));
-        (bytes32 salt, address predicted) = HookMiner.find(address(this), hash, 0, 1_000_000);
-        deployed = new DCAHook{salt: salt}(manager_, token_);
+        launcher = new DCAHookLauncher(address(this), manager_);
+        launcher.setToken(token_);
+        (bytes32 salt, address predicted) = HookMiner.find(address(launcher), launcher.hookInitCodeHash(), 0, 1_000_000);
+        deployed = launcher.launch(salt, Q96);
         assertEq(address(deployed), predicted);
     }
 

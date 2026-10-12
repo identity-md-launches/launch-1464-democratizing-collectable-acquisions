@@ -2,6 +2,10 @@
 
 An immutable, fixed-supply ERC-20 and a Uniswap v4 launch-pool hook. The hook charges 5% exclusively in FWA on buys and sells, in addition to the mandatory 1.25% pool fee. Wallet-to-wallet DCA transfers have no tax.
 
+This source repair adds `DCAHookLauncher`, an application that can be deployed at an ordinary address and then deploys the correctly addressed hook and initializes its pool atomically. The previous source already calculated 5%, but direct application deployment of `DCAHook` failed unless the deploying factory mined its address. The launcher moves that CREATE2 deployment into the delivered source. It uses the **existing DCA token**; it never deploys a token or changes its supply. No on-chain transactions are performed by this assignment.
+
+The fee becomes effective only for swaps using the pool returned by the launcher. Deploying the launcher alone does not activate it, and it cannot add a hook to a previously initialized pool. The launch operator must configure, activate, fund, and select this hooked pool as described below.
+
 ## Build and verification
 
 Run from the repository root with Foundry and Solidity 0.8.26 installed:
@@ -14,7 +18,7 @@ forge fmt --check
 
 `foundry.toml` pins Solidity 0.8.26, Cancun, optimizer settings, and `bytecode_hash = "none"`. All required Solidity dependencies are ordinary files in `lib/`; no dependency installation, network, environment variables, keys, FFI, or filesystem cheatcodes are needed to build or test. Exact dependency commits and retained files are recorded in `DEPENDENCIES.json`, with upstream licenses alongside them.
 
-Tests use the actual vendored Uniswap v4 `PoolManager` and a restricted FWA mock at FWA's canonical address. They exercise both address orderings, compare all four swap modes against an equivalent pool without the hook, test single-sided seeding and the first buy, and check fee custody and payout failures. Stateful invariant tests check conservation of both tokens, fees, and settled manager deltas across random swaps and claims. No mainnet fork or live transaction is used.
+Tests use the actual vendored Uniswap v4 `PoolManager` and a restricted FWA mock at FWA's canonical address. Their shared setup deploys and initializes through the production launcher. They exercise both address orderings, compare all four swap modes against an equivalent pool without the hook, test single-sided seeding and the first buy, and check fee custody and payout failures. Stateful invariant tests check conservation of both tokens, fees, and settled manager deltas across random swaps and claims. Launcher tests cover ordinary factory deployment, explicit ownership, missing configuration/contracts, invalid salts/prices, atomic rollback/retry, and one-time activation. No mainnet fork or live transaction is used.
 
 ## Contracts
 
@@ -22,8 +26,11 @@ Tests use the actual vendored Uniswap v4 `PoolManager` and a restricted FWA mock
 | --- | --- | --- |
 | `DCAToken` | None | Name `Democratizing Collectable Acquisions`, symbol `DCA`, 18 decimals; mints exactly 1,000,000,000 DCA to its deployer once. |
 | `DCAHook` | `IPoolManager poolManager_`, `address token_` | Fixed pool and fee; accrues FWA claims and permits anyone to trigger payment to the fixed recipient. |
+| `DCAHookLauncher` | `address owner_`, `IPoolManager poolManager_` | Ordinary-address application; the owner sets the existing token, then deploys the mined hook and initializes its pool in one call. |
 
-The token supply in base units is `1000000000000000000000000000`. The factory receives it in the constructor and performs the launch allocations. The hook constructor neither calls external contracts nor takes any token allocation. Both contracts have no owner, upgrade, pause, blacklist, privileged balance movement, or future mint function. The hook's deploying factory is recorded only as the authority to initialize its fixed pool. It cannot alter fees, recipients, currencies, or trading permissions.
+The token supply in base units is `1000000000000000000000000000`. Its original factory received it in the constructor and handled allocations; this follow-up must not repeat that deployment. The token and hook have no owner, upgrade, pause, blacklist, privileged balance movement, or future mint function. The hook constructor neither calls external contracts nor takes any token allocation. With the new path, its `launchFactory` is the launcher, which is the sole caller permitted to initialize its fixed pool.
+
+The launcher has an explicit, immutable requester owner, supplied as `$owner` by the separate launch manifest step. Its deploying application factory receives no ownership rights. The owner can correct the token setting before activation and choose the initial price, but cannot alter the hook's fee, recipient, or pool parameters. Token configuration and activation are permanently disabled after successful activation. The launcher never holds launch allocations, approves assets, routes swaps, or manages liquidity. All constructors make no external calls or code checks; activation checks that the manager and configured token have code.
 
 `HookMiner` is an internal library, and `PrepareHook` is an off-chain preparation script; neither is a launch application. No library linking is required.
 
@@ -33,8 +40,9 @@ The token supply in base units is `1000000000000000000000000000`. The factory re
 | --- | --- |
 | Chain | Ethereum mainnet, chain ID 1 |
 | FWA | `0xa0Df17B5aC76ABaBA36E1450E2cbCd18A620C845` (18 decimals) |
-| PoolManager constructor argument | `0x000000000004444c5dc75cB358380D2e3dE08A90` |
-| DCA constructor argument to hook | Address of this launch's `DCAToken` |
+| PoolManager constructor argument to launcher | `0x000000000004444c5dc75cB358380D2e3dE08A90` |
+| Launcher owner constructor argument | Requester's `$owner`; never the application factory or IMD's launch wallet |
+| DCA setting passed to hook | Existing project's `DCAToken` address, configured with `setToken` |
 | Fee recipient | `0xCAE0B01E56cB164ce866A137d3528658b2FCBd4b` |
 | Hook fee | 500 basis points (5%), immutable |
 | Pool fee | `12500` millionths (1.25%), static |
@@ -43,7 +51,7 @@ The token supply in base units is `1000000000000000000000000000`. The factory re
 
 `getPoolKey()` sorts DCA and FWA by address and includes this hook, the mandatory fee, and tick spacing. The immutable `poolId` binds all hook callbacks to this exact key. Other pairs, fee tiers, tick spacings, and hook addresses are rejected. Dynamic pool fees are rejected. The hook never overrides the pool fee.
 
-The flags `0x20cc` enable `beforeInitialize`, `beforeSwap`, `afterSwap`, and both swap-return-delta permissions. Unused callbacks are disabled. Construction rejects an address with different flags.
+The flags `0x20cc` enable `beforeInitialize`, `beforeSwap`, `afterSwap`, and both swap-return-delta permissions. Unused callbacks are disabled. Hook construction rejects an address with different flags. The launcher itself has no address-bit requirement and must never be used as `PoolKey.hooks`.
 
 ## Fee arithmetic and swap behavior
 
@@ -76,23 +84,30 @@ FWA's supplied transfer definition allows transfers involving the PoolManager bu
 
 ## Deployment responsibilities
 
-1. The launch's factory deploys `DCAToken`; it receives the entire supply. Record the actual token address.
-2. Prepare the hook's CREATE2 address using the **actual deploying factory**, the token address, canonical mainnet PoolManager, and the exact compiled creation code. The low address bits must be `0x20cc`. Deploy `DCAHook` directly from that factory, with arguments `(PoolManager, DCAToken)` in that order. Its `launchFactory` immutable must be the factory that will call `PoolManager.initialize`.
-3. Initialize the key returned by `getPoolKey()` through that factory, at the launch policy's derived opening price, and seed liquidity. Seeding and LP withdrawals have no hook fee. No hook initialization/setter transaction is required.
-4. Verify the deployed bytecode, immutable arguments, fee recipient, address bits, pool key, and actual launch allocations before releasing the launch. Exercise a quoted buy, sell, and fee claim through the intended routing stack during the independent release review.
+1. Keep the project's existing DCA token and its current supply/allocations. Obtain its actual address from the project's deployment record. This repository supplies no replacement token deployment for this repair.
+2. Deploy **`DCAHookLauncher` as the application**, using `(requesterOwner, canonicalMainnetPoolManager)`. Ordinary CREATE or CREATE2 works: the application factory need not mine its own deployment salt. Do not list `DCAHook` as an ordinary-address application; it is created by the launcher during activation. Neither application nor hook receives any token allocation.
+3. The requester owner calls `setToken(existingDcaAddress)`. This setting emits `TokenConfigured`; attempts to prepare or activate before configuration revert with `TokenNotConfigured`. A mistaken setting can be corrected before activation. Confirm the manager, owner, and token before proceeding.
+4. Prepare a child salt with `PrepareHook.runLauncher(launcher, start, attempts)`, using the deployed launcher's address and current configuration. It reads `hookInitCodeHash()` from that launcher, so the hash includes the creation code embedded in the application and its actual manager/token arguments. Check that `launcher.predictHook(salt)` equals the prepared address and ends with the required low bits. Mine off-chain; activation does no search loop.
+5. The owner calls `launcher.launch(salt, sqrtPriceX96)` with the actual opening price derived from the intended market cap, supply, and sorted token ordering. This creates `DCAHook`, initializes exactly its `getPoolKey()`, stores `hook()`, and emits `PoolLaunched`. Invalid salts, invalid prices, and manager failures revert the entire operation, including child creation; correct the cause and retry. Anyone else, including the deploying factory, is rejected. Activation cannot repeat.
+6. Seed liquidity in **`launcher.getPoolKey()`** and configure the site, quoter, and swap router to use that exact key. `PoolKey.hooks` must equal `launcher.hook()`. Initializing a pool provides no liquidity. The liquidity operator must use the existing token allocation and enforce price/amount bounds; when the owner is a batching contract, activation and liquidity provisioning can be batched atomically through the operator's reviewed liquidity tooling. Seeding and withdrawals have no hook fee.
+7. Verify bytecode, immutable values, address bits, pool ID, liquidity, and actual routing before enabling trading. Exercise a quoted buy, sell, and fee claim through the intended routing stack during the independent release review. Afterward the owner has no fee or trading controls.
 
-The pure preparation entry point is:
+Preparation entry points (simulation only, no environment reads or broadcasting):
 
 ```solidity
+PrepareHook.runLauncher(DCAHookLauncher launcher, uint256 start, uint256 attempts)
+    returns (bytes32 salt, address hook, bytes32 initCodeHash);
+
+// Retained for a factory that already supports direct mined-hook deployment on mainnet:
 PrepareHook.run(address factory, address token, uint256 start, uint256 attempts)
     returns (bytes32 salt, address hook, bytes32 initCodeHash);
 ```
 
-It can be simulated with `forge script script/PrepareHook.s.sol:PrepareHook --sig "run(address,address,uint256,uint256)" FACTORY TOKEN 0 1000000` after replacing `FACTORY` and `TOKEN` with the launch's actual addresses. No `--broadcast` is needed or authorized. If the search interval is exhausted, use a subsequent interval. Recompiling with different settings or changing constructor arguments requires mining again. The tests call this function directly and verify deployment through a separate factory without any external contracts installed.
+To prepare a deployed launcher, simulate `forge script script/PrepareHook.s.sol:PrepareHook --sig "runLauncher(address,uint256,uint256)" LAUNCHER 0 1000000 --rpc-url RPC_URL`, substituting its actual address and a read-only Ethereum RPC endpoint. No `--broadcast` is needed or authorized. An exhausted search returns `SaltNotFound`; try the next interval. Changing the launcher address or token configuration requires mining again. `runLauncher` hashes the deployed launcher's embedded child code, avoiding a mismatch with locally recompiled child code. The direct `run` entry point instead uses the local compiled bytecode and requires mining again after recompilation.
 
-**Pool wiring is essential:** the launch must select its hook-capable deployment path and set `PoolKey.hooks` to `DCAHook` when the pool is created. Merely deploying the hook as an application beside the default initialization-guard pool does not install a fee. A pool's hook cannot be replaced after initialization. The supplied custom-token floor checks use a guard-only pool and establish token launch compatibility; the repository's real-manager integration tests additionally verify the requested custom hook. The launch manifest/deployer step must preserve this hook wiring; this repository does not invent a `launch.json` or assume an undocumented factory ABI.
+**Integration boundary:** this source now supplies child deployment and hooked-pool initialization without requiring the external application factory to mine a salt. It does not modify IMD's external factory, its default guard-only pool, or an existing pool's immutable hook. A deployment flow that only creates the application and keeps routing to the default pool still does **not** charge the additional 5%. The operator must execute the activation steps and select/fund the resulting hooked pool, or use a hook-capable launch path that deploys `DCAHook` directly. Existing liquidity is not moved by this repair. If a guard-only pool already exists, switching liquidity/routing needs a separately reviewed operator transaction using the same DCA token. No manifest, deployment, migration, or token re-mint is performed here.
 
-The launch policy values supplied with the assignment remain the manifest step's responsibility:
+The launch policy values recorded by the earlier implementation remain the launch operator's responsibility; this repair does not execute or repeat allocations:
 
 | Item | Required value |
 | --- | --- |
@@ -108,7 +123,9 @@ Neither this hook nor any auxiliary contract is allocated launch tokens. The act
 
 ## After launch
 
-There are no owner-settable token or hook settings. A keeper, the recipient, or any other account may monitor `pendingFees()` and pay gas to call `claimFees()`; there is no automatic payout schedule or keeper bounty. Index `HookFeeAccrued` and `FeesClaimed` events to reconcile accruals and payments.
+After application deployment, the requester owner must call **`DCAHookLauncher.setToken(address)`** with the existing DCA address from the deployment record, prepare the salt, and call **`launch(bytes32,uint160)`** at the reviewed opening price. Then the liquidity/site operators must complete step 6 above. There are no owner-settable fee or recipient values and no post-activation launcher settings. The launcher's immutable owner is responsible only for this setup; a lost owner key before activation cannot be recovered by the factory.
+
+A keeper, the recipient, or any other account may monitor the child hook's `pendingFees()` and pay gas to call `claimFees()`; there is no automatic payout schedule or keeper bounty. Index `PoolLaunched` to find the child and pool, and `HookFeeAccrued` and `FeesClaimed` to reconcile accruals and payments. Call `claimFees()` on `launcher.hook()`, not on the launcher.
 
 The recipient is responsible for its wallet and for disposing of FWA through allowed transfer paths. Receipt of FWA does not exempt it from FWA's own transfer restrictions. The launch operator must confirm that the supplied mainnet FWA definition and PoolManager deployment remain the intended integrations. The mock models the supplied transfer rule, not all possible future FWA governance behavior.
 

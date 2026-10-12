@@ -293,7 +293,7 @@ abstract contract DCAHookBehavior is HookTestBase {
     function test_FeeAndRecipientCannotBeChanged() public {
         assertEq(hook.FEE_BPS(), 500);
         assertEq(hook.FEE_RECIPIENT(), RECIPIENT);
-        assertEq(hook.launchFactory(), address(this));
+        assertEq(hook.launchFactory(), address(launcher));
         string[6] memory functions = [
             "setFeeBps(uint256)",
             "setFeeRecipient(address)",

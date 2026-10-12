@@ -10,6 +10,13 @@ restricted FWA mock. No network, environment changes, fork, or extra dependency 
 | `DCATokenStateful.t.sol` | Four actors execute transfers, approvals, delegated transfers, and deliberate failures. Independent balance and allowance ledgers must agree with the token after every call; the full fixed supply must remain transferable after each sequence. |
 | `DCAHookEdges.t.sol` | Integer rounding and signed limits, invalid callback amounts/signs, untrusted callback data, failed batch rollback, currency isolation, initialized tick crossings, and fee backing after all liquidity is removed. Both currency orderings run each test. |
 | `DCAHookStateful.t.sol` | Three traders mix all four swap modes, dust, round trips, liquidity changes, FWA claim donations, claims, rejected payouts, and rejected partial fills. Both currency orderings run 256 sequences of 64 calls. |
+| `DCAHookLauncher.t.sol` | Ordinary application factory deployment, explicit requester ownership, unset/invalid configuration, first-use code checks, exact CREATE2 predictions, atomic deploy-and-initialize, bad salts/prices with rollback/retry, one-time activation, and separation from existing unhooked pools. |
+
+All hook swap, edge, and stateful suites now deploy and initialize through
+`DCAHookLauncher`, using its production bytecode and the real PoolManager. The
+original direct-deployment checks remain in `Deployment.t.sol`. Thus the additional
+5% FWA fee and the retained 1.25% pool fee are checked through the repaired activation
+path, for both address orderings, with no constructor-validation bypass.
 
 The hook handler advances a second pool without the hook using the same effective
 swap amounts and liquidity changes. Its output, price, and LP fee growth are the
