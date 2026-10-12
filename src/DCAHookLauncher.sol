@@ -5,6 +5,7 @@ import {DCAHook} from "./DCAHook.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolId} from "v4-core/src/types/PoolId.sol";
+import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 
 /// @notice Deploys and initializes the fixed 5% FWA hook pool for an existing DCA token.
 /// @dev The launcher itself needs no special address bits. Mine the child's salt off-chain.
@@ -25,9 +26,10 @@ contract DCAHookLauncher {
     error ContractNotDeployed(address account);
     error AlreadyLaunched();
     error NotLaunched();
+    error UnexpectedTick();
 
     event TokenConfigured(address indexed token);
-    event PoolLaunched(address indexed hook, PoolId indexed poolId, bytes32 salt, uint160 sqrtPriceX96);
+    event PoolLaunched(address indexed hook, PoolId indexed poolId, bytes32 salt, uint160 sqrtPriceX96, int24 tick);
 
     /// @param owner_ The requester's launch owner, supplied explicitly (never the deploying factory).
     /// @param poolManager_ The canonical PoolManager on the launch chain.
@@ -110,8 +112,11 @@ contract DCAHookLauncher {
         deployed = new DCAHook{salt: salt}(poolManager, configuredToken);
         // Freeze configuration before calling the manager. The child's constructor calls no contracts.
         hook = deployed;
-        poolManager.initialize(deployed.getPoolKey(), sqrtPriceX96);
-        emit PoolLaunched(address(deployed), deployed.poolId(), salt, sqrtPriceX96);
+        PoolKey memory key = deployed.getPoolKey();
+        // Same tick (and same invalid-price revert) as the manager's own initialization.
+        int24 tick = TickMath.getTickAtSqrtPrice(sqrtPriceX96);
+        emit PoolLaunched(address(deployed), key.toId(), salt, sqrtPriceX96, tick);
+        if (poolManager.initialize(key, sqrtPriceX96) != tick) revert UnexpectedTick();
     }
 
     /// @notice The initialized pool key to use for liquidity provisioning, quotes, and swaps.

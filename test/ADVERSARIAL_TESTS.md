@@ -42,3 +42,13 @@ failures; these tests do not validate live deployment wiring or future FWA upgra
 Random swaps are bounded to keep the pools liquid and traders funded for each
 64-call sequence. Separate deterministic tests cover signed arithmetic limits, full
 liquidity withdrawal, and the existing suite's large claim redemptions.
+
+## Mainnet launcher (`test/DCAMainnetLauncher.t.sol`)
+
+- Owner-only, one-time `launch`; the deploying factory and strangers are rejected and nothing is created.
+- Wrong hook salt reverts the whole launch (no token, no hook, no state) and the correct salt then succeeds.
+- Missing PoolManager or FWA code reverts with `ContractNotDeployed`.
+- `unlockCallback` from a non-manager, or from the manager with no pending action, reverts.
+- LP fee payout rejected by FWA reverts and succeeds on retry; reentering `collectFees` from the payout fails.
+- The hooked pool cannot be initialized by anyone else after launch.
+- The preparation script rejects wrong chain, owner, manager, missing launcher code, a PoolManager that is not an FWA distributor, an exhausted salt search, and an already launched launcher.

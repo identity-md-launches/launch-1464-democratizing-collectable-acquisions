@@ -143,7 +143,7 @@ contract DCAHookLauncherTest is Test {
         uint256 balance = token.balanceOf(address(this));
         PoolKey memory expectedKey = _key(predicted);
         vm.expectEmit(true, true, false, true, address(launcher));
-        emit DCAHookLauncher.PoolLaunched(predicted, expectedKey.toId(), salt, Q96);
+        emit DCAHookLauncher.PoolLaunched(predicted, expectedKey.toId(), salt, Q96, 0);
         vm.prank(owner);
         DCAHook deployed = launcher.launch(salt, Q96);
 
@@ -279,7 +279,7 @@ contract DCAHookLauncherTest is Test {
         vm.expectEmit(true, false, false, true, address(launcher));
         emit DCAHookLauncher.TokenConfigured(address(token));
         vm.expectEmit(true, true, false, true, address(launcher));
-        emit DCAHookLauncher.PoolLaunched(predicted, _key(predicted).toId(), salt, Q96);
+        emit DCAHookLauncher.PoolLaunched(predicted, _key(predicted).toId(), salt, Q96, 0);
         vm.prank(owner);
         DCAHook deployed = launcher.launchWithToken(address(token), salt, Q96);
 

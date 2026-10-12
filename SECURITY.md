@@ -11,6 +11,21 @@ This project uses a standard OpenZeppelin ERC-20, an immutable hook, and a one-t
 - Traders and routers are untrusted. No sender, router, token holder, or deployer receives a fee exemption. Routers remain responsible for slippage and execution limits.
 - `PrepareLaunch` is a read-only simulation tool, never a signer or application owner. It checks Ethereum chain ID, the expected requester owner, canonical manager, DCA metadata and supply, FWA's manager/distributor status, and price bounds before returning activation calldata. These checks are a snapshot and do not establish contract provenance, choose a fair opening price, or prevent later FWA governance changes. Verify the actual deployment records and bytecode before signing.
 
+- `DCAMainnetLauncher` (mainnet launch) has one privileged action: its constructor-given owner, the operator `0x1EE3…413d`, may call `launch(salt)` once. Afterwards nobody holds any power over the token, hook, pool or locked position. The launcher only ever moves its own DCA balance: to the manager to settle the seeded position, and the remainder to the owner. It has no `transferFrom`, no approvals and no withdrawal of liquidity. LP fees can only be sent to the constant recipient.
+
+## Mainnet launcher cases reviewed
+
+| Concern | Mitigation and evidence |
+| --- | --- |
+| Pulling tokens from another account (the earlier rejected attempt's `transferFrom(owner, …)`) | The token is created by the launcher, so the full supply starts in the launcher. Seeding is `sync` + `transfer` of its own balance + `settle`. No `transferFrom` or allowance exists. |
+| Signer-chosen price or allocation | Price, supply, 88% and recipient are constants; `launch` takes only the hook salt. Tests compare the opening price with the 2M FWA market cap and the balances with the 88/12 split. |
+| Wrong salt, wrong address order, partial launch | The full outcome is computed first. Each external result (token and hook addresses, initialize tick, settled amount) is checked against it. A mismatch reverts the whole launch, and tests show a clean retry. Both address orders are tested. |
+| Squatting or front-running the pool | The token and hook are CREATE2 children of the launcher. The hook's `beforeInitialize` admits only the launcher. Initialization and seeding happen in the same transaction. |
+| Rug of the 88% | No function removes liquidity; `collectFees` changes liquidity by zero and the test asserts position liquidity is unchanged. |
+| Spoofed or reentrant callbacks | `unlockCallback` requires the manager and a pending action set by this contract. `launch` and `collectFees` are `nonReentrant`. The test reenters through an FWA payout callback and gets `ReentrancyGuardReentrantCall`. |
+| Fee payout blocked | A rejected payout reverts atomically; the fees stay on the position and a later call pays them (tested). |
+| Static analysis | Slither 0.11.4 (all detectors, `lib/` and `test/` filtered) reports no high, medium or low findings for `src/`. Only `too-many-digits` informational notes remain, from embedded creation code. The earlier attempt's findings were fixed: arbitrary-from `transferFrom`, unused returns of `unlock`, `initialize` and `modifyLiquidity`, reentrancy ordering, and timestamp use. |
+
 ## Adversarial cases reviewed
 
 | Concern | Mitigation and evidence |

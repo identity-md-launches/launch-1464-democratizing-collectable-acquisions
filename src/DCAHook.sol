@@ -179,7 +179,8 @@ contract DCAHook is IUnlockCallback, ReentrancyGuard {
         if (amount > MAX_DELTA) amount = MAX_DELTA;
         _claimAmount = amount;
         emit FeesClaimed(msg.sender, FEE_RECIPIENT, amount);
-        poolManager.unlock("");
+        uint256 paid = abi.decode(poolManager.unlock(""), (uint256));
+        if (paid != amount) revert UnexpectedDelta();
     }
 
     function unlockCallback(bytes calldata) external onlyPoolManager returns (bytes memory) {
@@ -189,7 +190,7 @@ contract DCAHook is IUnlockCallback, ReentrancyGuard {
         poolManager.burn(address(this), uint256(uint160(FWA)), amount);
         // FWA permits this transfer because the PoolManager is the sender.
         poolManager.take(Currency.wrap(FWA), FEE_RECIPIENT, amount);
-        return "";
+        return abi.encode(amount);
     }
 
     function _checkPool(PoolKey calldata key) private view {
